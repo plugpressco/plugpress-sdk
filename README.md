@@ -10,7 +10,35 @@ call — handles **self-hosted updates, licensing/validation, and shared admin U
 |------|-------|----------------|
 | `src/class-updater.php` | `PlugPress_Updater` | WordPress-native auto-updates (free + pro) |
 | `src/class-license.php` | `PlugPress_License` | key storage + validate / activate / deactivate (cached) |
-| `src/class-sdk.php` | `PlugPress_SDK` | entry point — wires the above + admin pages |
+| `src/class-notices.php` | `PlugPress_Notices` | shared admin-notice creator (flash + dismissible) |
+| `src/class-sdk.php` | `PlugPress_SDK` | entry point — wires the above + License/About pages |
+
+## Shared admin notices
+
+Every product gets a notice helper via `$sdk->notices()`:
+
+```php
+$sdk = PlugPress_SDK::init( $cfg );
+
+// one-time "flash" — shows on the next admin load, survives redirects, then clears
+$sdk->notices()->flash( __( 'Settings saved.', 'your-textdomain' ), 'success' );
+
+// sticky + dismissible — shows on every admin page until THIS user dismisses it
+$sdk->notices()->persistent(
+    'configure-smtp',
+    __( 'Add an SMTP host to send mail.', 'your-textdomain' ),
+    'warning'
+);
+```
+
+Types: `success` · `error` · `warning` · `info`. Flash notices use a short-lived
+per-user transient; persistent dismissals are stored in user meta (nonce-protected).
+For pro products the SDK auto-shows a dismissible "activate your license" nudge
+until the license is valid.
+
+> **Text domain:** SDK chrome is translated under the host plugin's `textdomain`
+> (defaults to `slug`). Pass `'textdomain' => 'your-textdomain'` in `init()` so
+> strings resolve against your plugin's translations.
 
 All classes are `class_exists`-guarded so multiple PlugPress plugins can ship
 the SDK on the same site without colliding.
