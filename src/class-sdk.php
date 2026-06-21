@@ -73,11 +73,17 @@ if ( ! class_exists( 'PlugPress_SDK' ) ) {
 				'file'              => '',
 				'version'           => '0.0.0',
 				'server'            => 'https://updates.plugpress.co',
-				'telemetry_server'  => '', // separate from update server; empty = telemetry disabled
-				'activate_redirect' => '', // URL to redirect to after first activation (e.g. onboarding)
+				'telemetry_server'  => '',    // empty = telemetry disabled
+				'activate_redirect' => '',    // redirect after first activation
 				'textdomain'        => (string) ( $config['slug'] ?? '' ),
 				'pro'               => false,
-				'updater'           => true,  // set false when another system (e.g. Freemius) handles updates
+				// Per-component toggles — disable what the distribution channel restricts:
+				//   ET Marketplace → updater:false, optin:false, feedback:false
+				//   Freemius/DiviPeople → updater:false, optin:true, feedback:true
+				//   PlugPress direct → all true (defaults)
+				'updater'           => true,
+				'optin'             => true,
+				'feedback'          => true,
 				'capability'        => 'manage_options',
 				'menu_parent'       => '',
 				'accent'            => '#2395E7',
@@ -86,17 +92,15 @@ if ( ! class_exists( 'PlugPress_SDK' ) ) {
 
 			$this->notices = new PlugPress_Notices( $this->cfg['slug'] );
 
-			// License component (pro only, and only when the SDK owns updates).
-			if ( $this->cfg['pro'] && $this->cfg['updater'] ) {
-				$this->license = new PlugPress_License( [
-					'slug'   => $this->cfg['slug'],
-					'server' => $this->cfg['server'],
-					'option' => $this->cfg['slug'] . '_license_key',
-				] );
-			}
-
-			// Updater — skip when another system (Freemius, WP.org) handles updates.
+			// License + Updater — only when SDK owns the update/licensing channel.
 			if ( $this->cfg['updater'] ) {
+				if ( $this->cfg['pro'] ) {
+					$this->license = new PlugPress_License( [
+						'slug'   => $this->cfg['slug'],
+						'server' => $this->cfg['server'],
+						'option' => $this->cfg['slug'] . '_license_key',
+					] );
+				}
 				$license = $this->license;
 				new PlugPress_Updater( [
 					'slug'        => $this->cfg['slug'],
@@ -107,35 +111,32 @@ if ( ! class_exists( 'PlugPress_SDK' ) ) {
 				] );
 			}
 
-			// Deactivation feedback modal (plugins.php).
-			$this->feedback = new PlugPress_Feedback( $this->cfg );
+			// Deactivation feedback modal — skip on ET marketplace builds.
+			if ( $this->cfg['feedback'] ) {
+				$this->feedback = new PlugPress_Feedback( $this->cfg );
+			}
 
-			// Opt-in notice for anonymous telemetry.
-			$this->optin = new PlugPress_Optin( $this->cfg );
+			// Telemetry opt-in — skip on ET marketplace builds (no external calls allowed).
+			if ( $this->cfg['optin'] && $this->cfg['telemetry_server'] ) {
+				$this->optin = new PlugPress_Optin( $this->cfg );
+				add_action( 'admin_init', array( $this->optin, 'maybe_send_telemetry' ) );
+			}
 
-			// Weekly telemetry ping — fires on admin_init, throttled inside the method.
-			add_action( 'admin_init', array( $this->optin, 'maybe_send_telemetry' ) );
+			// Activation redirect — only relevant when optin is active.
+			if ( $this->cfg['optin'] && $this->cfg['activate_redirect'] ) {
+				$plugin_basename = plugin_basename( $this->cfg['file'] );
+				$redirect_url    = $this->cfg['activate_redirect'];
+				$redirect_key    = $this->cfg['slug'] . '_pp_do_redirect';
+				$activated_opt   = $this->cfg['slug'] . '_pp_activated_at';
 
-			// After first activation: redirect to the onboarding URL (if configured)
-			// and record the activation time. Uses a short-lived transient so the
-			// redirect fires exactly once on the very next admin page load.
-			$plugin_basename  = plugin_basename( $this->cfg['file'] );
-			$redirect_url     = $this->cfg['activate_redirect'];
-			$redirect_key     = $this->cfg['slug'] . '_pp_do_redirect';
-			$activated_opt    = $this->cfg['slug'] . '_pp_activated_at';
-
-			add_action( 'activated_plugin', static function ( string $plugin ) use ( $plugin_basename, $redirect_url, $redirect_key, $activated_opt ) {
-				if ( $plugin !== $plugin_basename ) {
-					return;
-				}
-				update_option( $activated_opt, time(), false );
-				if ( $redirect_url ) {
+				add_action( 'activated_plugin', static function ( string $plugin ) use ( $plugin_basename, $redirect_url, $redirect_key, $activated_opt ) {
+					if ( $plugin !== $plugin_basename ) {
+						return;
+					}
+					update_option( $activated_opt, time(), false );
 					set_transient( $redirect_key, '1', 30 );
-				}
-			} );
+				} );
 
-			// Perform the redirect on the next admin request (skip bulk-activation).
-			if ( $redirect_url ) {
 				add_action( 'admin_init', function () use ( $redirect_key, $redirect_url ) {
 					if ( get_transient( $redirect_key ) && empty( $_GET['activate-multi'] ) ) {
 						delete_transient( $redirect_key );
