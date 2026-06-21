@@ -41,6 +41,8 @@ if ( ! class_exists( 'PlugPress_SDK' ) ) {
 		private array $cfg;
 		private ?PlugPress_License $license = null;
 		private PlugPress_Notices $notices;
+		private ?PlugPress_Feedback $feedback = null;
+		private ?PlugPress_Optin $optin = null;
 
 		public static function init( array $config ): PlugPress_SDK {
 			$slug = (string) ( $config['slug'] ?? '' );
@@ -52,29 +54,40 @@ if ( ! class_exists( 'PlugPress_SDK' ) ) {
 			return $sdk;
 		}
 
+		public static function get_instance( string $slug ): ?PlugPress_SDK {
+			return self::$instances[ $slug ] ?? null;
+		}
+
 		private function __construct( array $config ) {
 			$dir = __DIR__ . '/';
 			require_once $dir . 'class-updater.php';
 			require_once $dir . 'class-license.php';
 			require_once $dir . 'class-notices.php';
+			require_once $dir . 'class-feedback.php';
+			require_once $dir . 'class-optin.php';
+			require_once $dir . 'class-about.php';
 
 			$this->cfg = wp_parse_args( $config, [
-				'slug'        => '',
-				'name'        => '',
-				'file'        => '',
-				'version'     => '0.0.0',
-				'server'      => 'https://updates.plugpress.co',
-				'textdomain'  => (string) ( $config['slug'] ?? '' ),
-				'pro'         => false,
-				'capability'  => 'manage_options',
-				'menu_parent' => '',
-				'about'       => [],
+				'slug'              => '',
+				'name'              => '',
+				'file'              => '',
+				'version'           => '0.0.0',
+				'server'            => 'https://updates.plugpress.co',
+				'telemetry_server'  => '', // separate from update server; empty = telemetry disabled
+				'activate_redirect' => '', // URL to redirect to after first activation (e.g. onboarding)
+				'textdomain'        => (string) ( $config['slug'] ?? '' ),
+				'pro'               => false,
+				'updater'           => true,  // set false when another system (e.g. Freemius) handles updates
+				'capability'        => 'manage_options',
+				'menu_parent'       => '',
+				'accent'            => '#2395E7',
+				'about'             => [],
 			] );
 
 			$this->notices = new PlugPress_Notices( $this->cfg['slug'] );
 
-			// License component (pro only).
-			if ( $this->cfg['pro'] ) {
+			// License component (pro only, and only when the SDK owns updates).
+			if ( $this->cfg['pro'] && $this->cfg['updater'] ) {
 				$this->license = new PlugPress_License( [
 					'slug'   => $this->cfg['slug'],
 					'server' => $this->cfg['server'],
@@ -82,20 +95,60 @@ if ( ! class_exists( 'PlugPress_SDK' ) ) {
 				] );
 			}
 
-			// Updater (always). Pro passes the stored key so the worker can gate.
-			$license = $this->license;
-			new PlugPress_Updater( [
-				'slug'        => $this->cfg['slug'],
-				'plugin_file' => plugin_basename( $this->cfg['file'] ),
-				'version'     => $this->cfg['version'],
-				'server'      => $this->cfg['server'],
-				'license'     => $license ? fn() => $license->get_key() : null,
-			] );
+			// Updater — skip when another system (Freemius, WP.org) handles updates.
+			if ( $this->cfg['updater'] ) {
+				$license = $this->license;
+				new PlugPress_Updater( [
+					'slug'        => $this->cfg['slug'],
+					'plugin_file' => plugin_basename( $this->cfg['file'] ),
+					'version'     => $this->cfg['version'],
+					'server'      => $this->cfg['server'],
+					'license'     => $license ? fn() => $license->get_key() : null,
+				] );
+			}
+
+			// Deactivation feedback modal (plugins.php).
+			$this->feedback = new PlugPress_Feedback( $this->cfg );
+
+			// Opt-in notice for anonymous telemetry.
+			$this->optin = new PlugPress_Optin( $this->cfg );
+
+			// Weekly telemetry ping — fires on admin_init, throttled inside the method.
+			add_action( 'admin_init', array( $this->optin, 'maybe_send_telemetry' ) );
+
+			// After first activation: redirect to the onboarding URL (if configured)
+			// and record the activation time. Uses a short-lived transient so the
+			// redirect fires exactly once on the very next admin page load.
+			$plugin_basename  = plugin_basename( $this->cfg['file'] );
+			$redirect_url     = $this->cfg['activate_redirect'];
+			$redirect_key     = $this->cfg['slug'] . '_pp_do_redirect';
+			$activated_opt    = $this->cfg['slug'] . '_pp_activated_at';
+
+			add_action( 'activated_plugin', static function ( string $plugin ) use ( $plugin_basename, $redirect_url, $redirect_key, $activated_opt ) {
+				if ( $plugin !== $plugin_basename ) {
+					return;
+				}
+				update_option( $activated_opt, time(), false );
+				if ( $redirect_url ) {
+					set_transient( $redirect_key, '1', 30 );
+				}
+			} );
+
+			// Perform the redirect on the next admin request (skip bulk-activation).
+			if ( $redirect_url ) {
+				add_action( 'admin_init', function () use ( $redirect_key, $redirect_url ) {
+					if ( get_transient( $redirect_key ) && empty( $_GET['activate-multi'] ) ) {
+						delete_transient( $redirect_key );
+						wp_safe_redirect( $redirect_url );
+						exit;
+					}
+				} );
+			}
 
 			add_action( 'admin_menu', [ $this, 'register_pages' ], 80 );
 			add_action( 'admin_init', [ $this, 'handle_license_post' ] );
 
-			if ( $this->cfg['pro'] ) {
+			if ( $this->cfg['pro'] && $this->cfg['updater'] ) {
 				add_action( 'admin_notices', [ $this, 'maybe_license_nudge' ] );
 			}
 		}
@@ -107,6 +160,15 @@ if ( ! class_exists( 'PlugPress_SDK' ) ) {
 
 		public function license(): ?PlugPress_License {
 			return $this->license;
+		}
+
+		public function optin(): ?PlugPress_Optin {
+			return $this->optin;
+		}
+
+		/** Convenience: optin JS data for wp_localize_script, or null when telemetry is disabled. */
+		public function get_optin_js_data(): ?array {
+			return $this->optin ? $this->optin->get_js_data() : null;
 		}
 
 		/** Translate SDK chrome under the host plugin's text domain. */
@@ -222,43 +284,7 @@ if ( ! class_exists( 'PlugPress_SDK' ) ) {
 		}
 
 		public function render_about_page(): void {
-			$about    = $this->cfg['about'];
-			$accent   = '#16A34A';
-			$tagline  = (string) ( $about['tagline'] ?? '' );
-			$links    = ( ! empty( $about['links'] ) && is_array( $about['links'] ) ) ? $about['links'] : [];
-
-			echo '<div class="wrap">';
-			echo '<h1>' . esc_html( sprintf( $this->t( 'About %s' ), $this->cfg['name'] ) ) . '</h1>';
-
-			// Card
-			echo '<div style="max-width:760px;margin-top:12px;background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:24px 26px;">';
-
-			// Header row: name + version pill
-			echo '<div style="display:flex;align-items:center;gap:12px;">';
-			echo '<span style="display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:9px;background:' . esc_attr( $accent ) . ';color:#fff;font-weight:700;">P</span>';
-			echo '<div><div style="font-size:18px;font-weight:700;color:#0F172A;">' . esc_html( $this->cfg['name'] ) . '</div>';
-			echo '<span style="display:inline-block;margin-top:2px;font-size:12px;font-weight:600;color:#475569;background:#F1F5F9;border-radius:999px;padding:2px 10px;">v' . esc_html( $this->cfg['version'] ) . '</span></div>';
-			echo '</div>';
-
-			if ( '' !== $tagline ) {
-				echo '<p style="font-size:14px;color:#475569;line-height:1.6;margin:18px 0 0;">' . esc_html( $tagline ) . '</p>';
-			}
-
-			// Links as buttons
-			if ( $links ) {
-				echo '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:20px;">';
-				foreach ( $links as $label => $href ) {
-					echo '<a class="button" href="' . esc_url( $href ) . '" target="_blank" rel="noopener">' . esc_html( $label ) . '</a>';
-				}
-				echo '</div>';
-			}
-
-			echo '</div>'; // card
-
-			echo '<p style="margin-top:18px;color:#94A3B8;font-size:12px;">'
-				. '<span style="display:inline-block;width:16px;height:16px;border-radius:5px;background:' . esc_attr( $accent ) . ';color:#fff;font-size:10px;font-weight:700;line-height:16px;text-align:center;vertical-align:middle;margin-right:6px;">P</span>'
-				. esc_html( $this->t( 'A PlugPress product' ) ) . '</p>';
-			echo '</div>';
+			PlugPress_About::render( $this->cfg );
 		}
 
 		private function reason_label( string $reason ): string {

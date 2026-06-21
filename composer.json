@@ -1,20 +1,32 @@
 {
   "name": "plugpressco/plugpress-sdk",
-  "description": "Lite SDK for PlugPress WordPress plugins: self-hosted updates, licensing/validation, and shared admin UI.",
+  "description": "PlugPress SDK — self-hosted updates, licensing, telemetry opt-in, deactivation feedback, and About page for WordPress plugins.",
   "type": "library",
   "license": "GPL-2.0-or-later",
   "homepage": "https://plugpress.co",
-  "keywords": ["wordpress", "plugin", "updater", "license", "plugpress"],
+  "keywords": ["wordpress", "plugin", "updater", "license", "plugpress", "telemetry"],
   "authors": [
     { "name": "PlugPress", "homepage": "https://plugpress.co" }
   ],
   "require": {
-    "php": ">=8.1"
+    "php": ">=8.0"
   },
   "autoload": {
     "classmap": ["src/"]
   },
   "config": {
     "optimize-autoloader": true
+  },
+  "extra": {
+    "plugpress-sdk": {
+      "components": {
+        "updater":  "PlugPress_Updater  — self-hosted update checker (skip when Freemius/WP.org owns updates)",
+        "license":  "PlugPress_License  — license key activation/validation (gated on pro:true + updater:true)",
+        "optin":    "PlugPress_Optin    — anonymous telemetry opt-in (GDPR/WP-guideline 7 compliant)",
+        "feedback": "PlugPress_Feedback — deactivation reason modal on plugins.php",
+        "about":    "PlugPress_About    — About / Beta Hub admin page",
+        "notices":  "PlugPress_Notices  — shared dismissible admin notice helper"
+      }
+    }
   }
 }
