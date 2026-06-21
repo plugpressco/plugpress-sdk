@@ -155,9 +155,11 @@ if ( ! class_exists( 'PlugPress_Updater' ) ) {
 		 * Skipped on cron to avoid a recursive check loop.
 		 */
 		public function background_update_check(): void {
-			if ( wp_doing_cron() ) {
+			static $ran = [];
+			if ( isset( $ran[ $this->slug ] ) || wp_doing_cron() ) {
 				return;
 			}
+			$ran[ $this->slug ] = true;
 
 			$info = $this->remote();
 
